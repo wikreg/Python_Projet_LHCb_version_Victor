@@ -1,179 +1,304 @@
-import os
 import uproot
 import numpy as np
 import pandas as pd
 import zfit
-import plotly.graph_objects as go
-import plotly.express as px
+import matplotlib.pyplot as plt
+from hepstats.splot import compute_sweights
+
+# ==========================================
+# PALETTE DE COULEURS (THEME SOMBRE SIMPLE)
+# ==========================================
+
+COULEUR_FOND = "#0d1117"      # fond global sombre
+COULEUR_CADRE = "#161b22"     # fond interieur des graphiques
+COULEUR_SIGNAL = "#38bdf8"    # bleu cyan (histogrammes et signal)
+COULEUR_POINTS = "#7dd3fc"    # bleu clair (points de donnees)
+COULEUR_FIT = "#c084fc"       # violet (courbes de fit et FOM)
+COULEUR_BRUIT = "#fb7185"     # rose corail (bruit de fond)
+COULEUR_PULLS = "#2dd4bf"     # turquoise (pulls et optimum FOM)
+
+# configuration simple du theme sombre sur tous les graphiques
+plt.style.use("dark_background")
+plt.rcParams["figure.dpi"] = 200
+plt.rcParams["figure.facecolor"] = COULEUR_FOND
+plt.rcParams["axes.facecolor"] = COULEUR_CADRE
+plt.rcParams["axes.spines.top"] = False
+plt.rcParams["axes.spines.right"] = False
+plt.rcParams["grid.alpha"] = 0.25
 
 # variable pour stocker le nom du dossier dans lequel je vais sauvegarder les differents histograms
-# "histograms_plots" est un chemin relatif, python va ce debrouiller
 dossier_sortie = "histograms_plots"
 
 
-
-# fcts 3.1 & 3.2
-
+# ==========================================
+# FONCTIONS SECTIONS 3.1 & 3.2
+# ==========================================
 
 def charge_donnees(chemin_fichier, branches=None):
-    # Je recupere la ou les branches du fichier root au format pandas data frame
+    # --- THEORIE & FORMAT DES DONNEES ---
+    # En physique des particules (LHCb), les donnees sont stockees dans des fichiers .root
+    # sous forme d'arbres (TTree). Chaque ligne est un evenement (une collision)
+    # et chaque colonne (branche) est une grandeur physique mesuree (masse, impulsion, etc.).
+    #
+    # --- FONCTIONNEMENT DU CODE ---
+    # 1. uproot.open() ouvre le fichier ROOT directement en Python.
+    # 2. fichier["DecayTree"] recupere l'arbre contenant les candidats D0 -> K+ pi-.
+    # 3. .arrays(branches, library="pd") convertit les donnees en tableau DataFrame de pandas.
+
     fichier = uproot.open(chemin_fichier)
     arbre = fichier["DecayTree"]
     tableau = arbre.arrays(branches, library="pd")
     return tableau
 
-# f"{} -> f-string (format string) sert a insere directement la valeur dune variable dans du texte cool
 
-# tracage dun ou des histogramms
-def dessine_branche(df, noms_branches, nbins=169, dossier="histograms_plots"):
+def dessine_branche(df, noms_branches, nbins=169, echelle_log=True, dossier="histograms_plots"):
+    # --- THEORIE ---
+    # Un histogramme decoupe l'intervalle d'une variable en "nbins" barres et compte
+    # combien d'evenements tombent dans chaque barre. L'echelle log sur Y permet de voir
+    # les queues de distribution meme quand il y a un grand pic pres de 0 ou 1.
+    #
+    # --- FONCTIONNEMENT DU CODE ---
+    # On parcourt chaque colonne de "noms_branches" avec une boucle for.
+    # On zoome sur la zone utile pour D0_MINIPCHI2, D0_MINIP et D0_DIRA_OWNPV,
+    # et on garde l'echelle lineaire partant de 0 pour la masse D0_MM.
 
-    # boucle qui parcourt noms_branches element par element
     for nom in noms_branches:
-        # figure interactive de plotly
-        fig = px.histogram(
-            df, # table de donnees
-            x=nom, # definition de la colonne du tableau df a mettre sur laxe x
-            nbins=nbins, # nombre de barres
-            title=f"Distribution de {nom}", # titre de lhistogram
-            template="plotly_dark", # Theme sombre de plotly
-            opacity=0.85 # opacite de lhistogram
-        )
-        fig.update_layout(
-            xaxis_title=nom, # titre de laxe x
-            yaxis_title="Nombre d'évènements", # titre de laxe y
-            bargap=0.03, # distances entre les barres
-            title_x=0.5 # position du titre au centre du graphique
-        )
-        # sauvegarde de lhistogram en fichier html, automatique gere par plotly cool
-        fig.write_html(f"{dossier}/hist_{nom}.html")
+        if nom == "D0_MINIPCHI2":
+            plage = (0, 50)
+        elif nom == "D0_MINIP":
+            plage = (0, 2)
+        elif nom == "D0_DIRA_OWNPV":
+            plage = (0.99, 1.0)
+        else:
+            plage = None
+
+        plt.figure(figsize=(8, 5))
+        plt.hist(df[nom], bins=nbins, range=plage, histtype="stepfilled", color=COULEUR_SIGNAL, alpha=0.25)
+        plt.hist(df[nom], bins=nbins, range=plage, histtype="step", color=COULEUR_SIGNAL, linewidth=1.5)
+
+        if echelle_log and nom != "D0_MM":
+            plt.yscale("log")
+            plt.ylabel("Nombre d'évènements (échelle log)")
+        else:
+            plt.ylim(bottom=0)
+            plt.ylabel("Nombre d'évènements")
+
+        plt.title(f"Distribution de {nom}")
+        plt.xlabel(nom)
+        plt.grid(True)
+        plt.tight_layout()
+
+        plt.savefig(f"{dossier}/hist_{nom}.png")
+        plt.close()
 
 
-# tracage de plusieurs histograms sur un graphique
-def dessine_branche_multiple(liste_dfs, liste_noms_dfs, noms_branches, nbins=169, normaliser=True, dossier="histograms_plots"):
-    # liste_dfs -> liste python qui contien les tableaux filtres
-    # liste_noms_dfs -> liste des noms pour la legende
-    # normaliser -> booleen, True quand les histograms sont normaliser pour que laire totale soit egale a 1
-    
-    # si normaliser est True alors norme recoit du texte sinon elle est none
+def dessine_branche_multiple(liste_dfs, liste_noms_dfs, noms_branches, nbins=169, normaliser=True, echelle_log=True, dossier="histograms_plots"):
+    # --- THEORIE ---
+    # Pour choisir les coupures, on compare la distribution d'une variable pour le signal (pic)
+    # et pour le bruit de fond (bandes laterales). On normalise les histogrammes (density=True,
+    # aire totale = 1) pour comparer leurs formes sur la meme echelle.
+    #
+    # --- FONCTIONNEMENT DU CODE ---
+    # Pour chaque variable, on ouvre une figure et on superpose les histogrammes de "liste_dfs".
+
     if normaliser:
-        norme = "probability density"
         unite_y = "Densité de probabilité"
     else:
-        norme = None
         unite_y = "Nombre d'évènements"
 
-    # boucle qui parcours les differentes variables
+    if echelle_log:
+        unite_y = unite_y + " (échelle log)"
+
+    couleurs = [COULEUR_SIGNAL, COULEUR_BRUIT]
+
     for nom in noms_branches:
+        if nom == "D0_MINIPCHI2":
+            plage = (0, 50)
+        elif nom == "D0_DIRA_OWNPV":
+            plage = (0.99, 1.0)
+        else:
+            plage = None
 
-        # initialisation dune figure vide 
-        fig = go.Figure()
+        plt.figure(figsize=(8, 5))
 
-        # boucle qui parcours les tableaux et leurs noms en meme temps
         for i in range(len(liste_dfs)):
             df_actuel = liste_dfs[i]
             label_actuel = liste_noms_dfs[i]
+            couleur_actuelle = couleurs[i]
 
-            # ajoute un graphique sur la figure en cours
-            fig.add_trace(go.Histogram(
-                x=df_actuel[nom], # extraction de la colonne pour la metre sur laxe des x
-                name=label_actuel,
-                nbinsx=nbins,
-                histnorm=norme, # application de la norme
-                opacity=0.65
-            ))
+            plt.hist(df_actuel[nom], bins=nbins, range=plage, density=normaliser, histtype="stepfilled", color=couleur_actuelle, alpha=0.2)
+            plt.hist(df_actuel[nom], bins=nbins, range=plage, density=normaliser, histtype="step", color=couleur_actuelle, linewidth=1.7, label=label_actuel)
 
-        fig.update_layout(
-            title=f"Comparaison : {nom}", # titre du graphique
-            title_x=0.5, 
-            xaxis_title=nom, 
-            yaxis_title=unite_y,
-            barmode="overlay", # superposition des histogrammes par plotly
-            template="plotly_dark",
-            bargap=0.02
-        )
+        if echelle_log:
+            plt.yscale("log")
 
-        fig.write_html(f"{dossier}/superposition_{nom}.html") # enregistrement entant que fichier html
+        plt.title(f"Comparaison : {nom}")
+        plt.xlabel(nom)
+        plt.ylabel(unite_y)
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+
+        plt.savefig(f"{dossier}/superposition_{nom}.png")
+        plt.close()
 
 
+# ==========================================
+# FONCTIONS SECTIONS 3.3 & 3.6
+# ==========================================
 
-# fcts 3.3
+def fit_donnees(donnees, obs, model, poids=None):
+    # --- THEORIE STATISTIQUE (MAXIMUM DE VRAISEMBLANCE NON-BINNE ETENDU) ---
+    # zfit evalue la densite de probabilite f(x_i) directement sur chaque evenement x_i
+    # et minimise la log-vraisemblance negative -ln(L) avec l'algorithme Minuit.
+    # L'option "Extended" permet d'ajuster en meme temps le nombre d'evenements (N_sig, N_bkg).
+    # En section 3.6, "poids" permet de ponderer chaque evenement par son sWeight w_i.
+    #
+    # --- FONCTIONNEMENT DU CODE ---
+    # Convertit les donnees en format zfit, lance Minuit et calcule les erreurs avec .hesse().
 
-
-def fit_donnees(donnees, obs, model):
-    # je transforme la serie pandas en donnees compatibles avec zfit
-    data = zfit.Data(data=donnees.to_numpy(), obs=obs)
-    # nll -> log-vraisemblance negative etendue (cest ce que zfit va minimiser)
+    data = zfit.Data(data=donnees.to_numpy(), obs=obs, weights=poids)
     nll = zfit.loss.ExtendedUnbinnedNLL(model=model, data=data)
-    # minimizer -> algorithme Minuit qui cherche le minimum
     minimizer = zfit.minimize.Minuit()
-    # lancement du fit et mise a jour des parametres trouves
     result = minimizer.minimize(nll).update_params()
-    # calcul des erreurs statistiques sur chaque parametre
     result.hesse()
     return result
 
 
 # fit de la masse du D0 avec une gaussienne et une droite
 def fit_masse(df, branche="D0_MM", min_fit=1816, max_fit=1914, nom_param=""):
-    # on garde que les evenements qui sont entre min_fit et max_fit
+    # --- THEORIE PHYSIQUE ---
+    # Les vrais D0 forment un pic gaussien autour de mu (~1865 MeV/c^2) et d'ecart-type sigma.
+    # Le bruit de fond combinatoire varie lentement et se modelise par un polynome de Chebyshev
+    # d'ordre 1 (une droite de pente c1).
+    #
+    # --- FONCTIONNEMENT DU CODE ---
+    # 1. Filtre les donnees entre min_fit et max_fit et declare les 5 parametres libres.
+    # 2. Construit la somme Gauss + Chebyshev (SumPDF) et lance fit_donnees().
+    # 3. Calcule S et B sous le pic (fenetre [mu - 3*sigma, mu + 3*sigma]) pour la FOM du 3.4.
+
     masque_plage = (df[branche] >= min_fit) & (df[branche] <= max_fit)
     donnees_masse = df[masque_plage][branche]
     n_total = len(donnees_masse)
 
-    # obs -> espace de definition pour zfit
     obs = zfit.Space(branche, min_fit, max_fit)
 
-    # parametres libres du modele (valeur de depart, min, max)
-    # nom_param -> sert a rajouter un texte au nom pour pas que zfit plante quand on fait une boucle cool
     mu = zfit.Parameter(f"mu{nom_param}", 1865.0, 1850.0, 1880.0)
     sigma = zfit.Parameter(f"sigma{nom_param}", 8.0, 1.0, 25.0)
     c1 = zfit.Parameter(f"c1{nom_param}", 0.0, -1.0, 1.0)
 
-    # nombre devenements de signal et de bruit
     n_sig = zfit.Parameter(f"n_sig{nom_param}", 0.5 * n_total, 0, n_total * 1.5)
     n_bkg = zfit.Parameter(f"n_bkg{nom_param}", 0.5 * n_total, 0, n_total * 1.5)
 
-    # sig_model -> gaussienne pour le pic du signal
     sig_model = zfit.pdf.Gauss(obs=obs, mu=mu, sigma=sigma, extended=n_sig)
-    # bkg_model -> polynome de Chebyshev dordre 1 (une droite pour le bruit)
     bkg_model = zfit.pdf.Chebyshev(obs=obs, coeffs=[c1], extended=n_bkg)
-    # model -> somme des deux modeles
     model = zfit.pdf.SumPDF([sig_model, bkg_model])
 
-    # lancement du fit avec la fonction dau dessus
     result = fit_donnees(donnees_masse, obs, model)
 
-    # recuperation des valeurs trouvees par le fit pour calculer S et B (pour le 3.4)
+    # calcul de S et B sous le pic (entre mu - 3*sigma et mu + 3*sigma)
     params = result.params
     mu_val = params[mu]["value"]
     sigma_val = params[sigma]["value"]
     S = params[n_sig]["value"]
     n_bkg_total = params[n_bkg]["value"]
 
-    # fenetre_pic -> on prend la zone autour du pic entre mu - 3*sigma et mu + 3*sigma
     fenetre_pic = zfit.Space(branche, mu_val - 3 * sigma_val, mu_val + 3 * sigma_val)
-    # integration de la droite du bruit juste sous le pic pour savoir combien de bruit est cache dedans
-    # .numpy()[0] -> recupere juste le nombre decimal de zfit
     fraction_bruit_sous_pic = bkg_model.integrate(limits=fenetre_pic).numpy()[0]
     B = n_bkg_total * fraction_bruit_sous_pic
 
-    return result, model, bkg_model, donnees_masse, mu, sigma, n_sig, n_bkg, S, B
+    return result, model, sig_model, bkg_model, donnees_masse, mu, sigma, n_sig, n_bkg, S, B
 
 
+# fonction demandee en 3.3.3 et 3.3.4 : trace les donnees, le fit, les pulls et calcule le chi2
+def trace_fit(donnees_masse, model, bkg_model, mu_val, mu_err, n_sig_val, n_bkg_val, min_fit=1816, max_fit=1914, nbins=100):
+    # --- THEORIE STATISTIQUE (PULLS ET CHI2 REDUIT) ---
+    # Dans chaque barre i, le pull vaut : pull_i = (N_modele - N_donnees) / sqrt(N_donnees).
+    # Un bon fit donne des pulls aleatoires autour de 0 (entre -2 et +2) et un chi2 reduit
+    # chi2 / ndf proche de 1 (avec ndf = nombre de barres - nombre de parametres libres).
 
-# fcts 3.4
+    largeur_bin = (max_fit - min_fit) / nbins
+    comptes, bords = np.histogram(donnees_masse, bins=nbins, range=(min_fit, max_fit))
+
+    centres = []
+    erreurs_data = []
+    for i in range(nbins):
+        milieu = (bords[i] + bords[i + 1]) / 2
+        centres.append(milieu)
+        if comptes[i] > 0:
+            erreurs_data.append(np.sqrt(comptes[i]))
+        else:
+            erreurs_data.append(1.0)
+
+    centres = np.array(centres)
+    erreurs_data = np.array(erreurs_data)
+
+    x_lisse = np.linspace(min_fit, max_fit, 500)
+    y_total_lisse = model.pdf(x_lisse).numpy() * (n_sig_val + n_bkg_val) * largeur_bin
+    y_bkg_lisse = bkg_model.pdf(x_lisse).numpy() * n_bkg_val * largeur_bin
+
+    # 1. Graphique du fit de masse
+    plt.figure(figsize=(8.5, 5))
+    plt.fill_between(x_lisse, 0, y_bkg_lisse, color=COULEUR_BRUIT, alpha=0.15)
+    plt.fill_between(x_lisse, y_bkg_lisse, y_total_lisse, color=COULEUR_FIT, alpha=0.15)
+    plt.errorbar(centres, comptes, yerr=erreurs_data, fmt="o", color=COULEUR_POINTS, markersize=3.8, label="Données sélectionnées")
+    plt.plot(x_lisse, y_total_lisse, color=COULEUR_FIT, linewidth=2.4, label=f"Fit zfit (M = {mu_val:.2f} ± {mu_err:.2f} MeV/c²)")
+    plt.plot(x_lisse, y_bkg_lisse, color=COULEUR_BRUIT, linestyle="--", linewidth=1.8, label="Bruit de fond (Chebyshev)")
+    plt.ylim(bottom=0)
+    plt.title("Fit étendu (zfit) de la masse du D⁰")
+    plt.xlabel("Masse D⁰ [MeV/c²]")
+    plt.ylabel(f"Évènements / {largeur_bin:.2f} MeV/c²")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f"{dossier_sortie}/fit_masse_D0.png")
+    plt.close()
+
+    # 2. Calcul des pulls et du chi2 reduit
+    prediction_bins = model.pdf(centres).numpy() * (n_sig_val + n_bkg_val) * largeur_bin
+    pulls = []
+    somme_pulls_carre = 0.0
+
+    for i in range(nbins):
+        pull_i = (prediction_bins[i] - comptes[i]) / erreurs_data[i]
+        pulls.append(pull_i)
+        somme_pulls_carre = somme_pulls_carre + pull_i ** 2
+
+    plt.figure(figsize=(8.5, 3.8))
+    plt.axhspan(-2, 2, color=COULEUR_PULLS, alpha=0.08)
+    plt.bar(centres, pulls, width=largeur_bin * 0.85, color=COULEUR_PULLS)
+    plt.axhline(0, color="white", linewidth=1)
+    plt.axhline(2, color=COULEUR_BRUIT, linestyle="--", linewidth=1)
+    plt.axhline(-2, color=COULEUR_BRUIT, linestyle="--", linewidth=1)
+    plt.title("Pulls du fit de masse du D⁰")
+    plt.xlabel("Masse D⁰ [MeV/c²]")
+    plt.ylabel("(Modèle - Données) / σ")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f"{dossier_sortie}/pulls_masse_D0.png")
+    plt.close()
+
+    n_params_flottants = 5 # mu, sigma, c1, n_sig, n_bkg
+    ndf = nbins - n_params_flottants
+    chi2_reduit = somme_pulls_carre / ndf
+    print("Chi2 réduit :", round(chi2_reduit, 3), "(pour", ndf, "degrés de liberté)")
+
+    return comptes, centres, erreurs_data, largeur_bin, chi2_reduit
 
 
-# teste plusieurs coupures sur une variable et trace la FOM pour trouver la meilleure
+# ==========================================
+# FONCTIONS SECTION 3.4
+# ==========================================
+
 def FOM_variable(df, nom_variable, liste_seuils, type_coupure="superieur", suffixe_fichier=""):
-    # liste_seuils -> liste des valeurs a tester
-    # type_coupure -> "superieur" pour garder (var > seuil) ou "inferieur" pour garder (var < seuil)
+    # --- THEORIE STATISTIQUE (FIGURE DE MERITE) ---
+    # L'incertitude statistique sur N = S + B evenements dans le pic vaut sqrt(S + B).
+    # On cherche la coupure qui maximise FOM = S / sqrt(S + B).
 
     liste_fom = []
     meilleure_fom = 0.0
     meilleur_seuil = liste_seuils[0]
 
-    # boucle qui teste chaque seuil de la liste un par un
     for i in range(len(liste_seuils)):
         seuil = liste_seuils[i]
 
@@ -182,86 +307,83 @@ def FOM_variable(df, nom_variable, liste_seuils, type_coupure="superieur", suffi
         else:
             df_test = df[df[nom_variable] < seuil]
 
-        # on refait le fit de masse sur les donnees filtrees pour avoir S et B
-        result, model, bkg_model, donnees_masse, mu, sigma, n_sig, n_bkg, S, B = fit_masse(
+        result, model, sig_model, bkg_model, donnees_masse, mu, sigma, n_sig, n_bkg, S, B = fit_masse(
             df_test, nom_param=f"_{nom_variable}{suffixe_fichier}_{i}"
         )
 
-        # calcul de la FOM avec la formule du poly
         fom = S / np.sqrt(S + B)
         liste_fom.append(fom)
 
-        # si la FOM est plus grande que lancienne meilleure on la garde
         if fom > meilleure_fom:
             meilleure_fom = fom
             meilleur_seuil = seuil
 
-    # trace de la courbe FOM avec plotly cool
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=liste_seuils, # valeurs des seuils sur laxe x
-        y=liste_fom, # valeurs de la FOM sur laxe y
-        mode="lines+markers",
-        name=f"FOM ({nom_variable})",
-        line=dict(color="gold", width=2.5),
-        marker=dict(size=8)
-    ))
-    fig.update_layout(
-        title=f"Optimisation de la sélection : FOM pour {nom_variable}{suffixe_fichier}",
-        title_x=0.5,
-        xaxis_title=f"Seuil sur {nom_variable}",
-        yaxis_title="FOM = S / √(S + B)",
-        template="plotly_dark"
-    )
-    # sauvegarde automatique en html
-    fig.write_html(f"{dossier_sortie}/FOM_{nom_variable}{suffixe_fichier}.html")
+    plt.figure(figsize=(8, 5))
+    plt.plot(liste_seuils, liste_fom, marker="o", color=COULEUR_FIT, linewidth=2.4, label=f"FOM ({nom_variable})")
+    plt.fill_between(liste_seuils, liste_fom, min(liste_fom) * 0.99, color=COULEUR_FIT, alpha=0.14)
+    plt.axvline(meilleur_seuil, color=COULEUR_PULLS, linestyle="--", linewidth=1.3)
+    plt.scatter([meilleur_seuil], [meilleure_fom], color=COULEUR_PULLS, s=80, zorder=5, label=f"Optimum : {meilleur_seuil} (FOM = {meilleure_fom:.1f})")
+    plt.ylim(min(liste_fom) * 0.99, max(liste_fom) * 1.01)
+    plt.title(f"Optimisation de la sélection : FOM pour {nom_variable}{suffixe_fichier}")
+    plt.xlabel(f"Seuil sur {nom_variable}")
+    plt.ylabel("FOM = S / √(S + B)")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f"{dossier_sortie}/FOM_{nom_variable}{suffixe_fichier}.png")
+    plt.close()
 
     return meilleur_seuil, meilleure_fom
 
 
+# ==========================================
+# FONCTIONS SECTIONS 3.5 & 3.6
+# ==========================================
 
-# fcts 3.5
+def fit_duree_vie_simple(df, branche="D0_TAU", min_tau=0.0004, max_tau=0.004, nom_param="", colonne_poids=None):
+    # --- THEORIE PHYSIQUE ---
+    # Le D0 se desintegre selon exp(-t / tau). Dans zfit, la loi s'ecrit exp(lam * t),
+    # donc tau = -1 / lam. On coupe sous 0.0004 ns pour eviter l'effet du trigger.
+    # En section 3.6, si "colonne_poids" est donnee, on pondere chaque evenement par son sWeight.
 
-
-# fit avec une seule exponentielle (pour le 3.5.1 et le bruit du 3.5.2)
-def fit_duree_vie_simple(df, branche="D0_TAU", min_tau=0.0004, max_tau=0.004, nom_param=""):
-    # on part de 0.0004 ns pour eviter la coupure du detecteur au debut
     masque_tau = (df[branche] >= min_tau) & (df[branche] <= max_tau)
     donnees_tau = df[masque_tau][branche]
-    n_total = len(donnees_tau)
+
+    if colonne_poids is not None:
+        poids_tau = df[masque_tau][colonne_poids].to_numpy()
+        n_total = np.sum(poids_tau)
+    else:
+        poids_tau = None
+        n_total = len(donnees_tau)
 
     obs = zfit.Space(branche, min_tau, max_tau)
 
-    # dans zfit lexponentielle cest exp(lam * t) donc lam = -1 / tau (vers -2400 ns^-1)
     lam = zfit.Parameter(f"lam{nom_param}", -2400.0, -15000.0, -100.0)
-    n_evts = zfit.Parameter(f"n_evts{nom_param}", n_total, 0, n_total * 1.5)
+    n_evts = zfit.Parameter(f"n_evts{nom_param}", n_total, 0, abs(n_total) * 2.0)
 
-    # modele exponentiel etendu
     model = zfit.pdf.Exponential(obs=obs, lam=lam, extended=n_evts)
-
-    # on recycle la fonction de fit dau dessus
-    result = fit_donnees(donnees_tau, obs, model)
+    result = fit_donnees(donnees_tau, obs, model, poids=poids_tau)
 
     return result, model, donnees_tau, lam, n_evts
 
 
-# fit avec 2 exponentielles : le signal libre + le bruit bloque
 def fit_duree_vie_complet(df, lam_bkg_fixe, branche="D0_TAU", min_tau=0.0004, max_tau=0.004):
+    # --- THEORIE PHYSIQUE ---
+    # Somme de deux exponentielles : signal (pente libre lam_sig) + bruit de fond
+    # (pente lam_bkg bloquee a la valeur mesuree dans les bandes laterales).
+
     masque_tau = (df[branche] >= min_tau) & (df[branche] <= max_tau)
     donnees_tau = df[masque_tau][branche]
     n_total = len(donnees_tau)
 
     obs = zfit.Space(branche, min_tau, max_tau)
 
-    # lam_sig -> pente libre pour le signal
     lam_sig = zfit.Parameter("lam_sig_final", -2400.0, -15000.0, -100.0)
-    # floating=False -> bloque la pente du bruit a la valeur trouvee sur les bandes laterales
     lam_bkg = zfit.Parameter("lam_bkg_final", lam_bkg_fixe, floating=False)
 
     n_sig = zfit.Parameter("n_sig_tau", 0.8 * n_total, 0, n_total * 1.5)
     n_bkg = zfit.Parameter("n_bkg_tau", 0.2 * n_total, 0, n_total * 1.5)
 
-    # somme de lexponentielle du signal et de celle du bruit
     sig_model = zfit.pdf.Exponential(obs=obs, lam=lam_sig, extended=n_sig)
     bkg_model = zfit.pdf.Exponential(obs=obs, lam=lam_bkg, extended=n_bkg)
     model = zfit.pdf.SumPDF([sig_model, bkg_model])
@@ -271,92 +393,99 @@ def fit_duree_vie_complet(df, lam_bkg_fixe, branche="D0_TAU", min_tau=0.0004, ma
     return result, model, bkg_model, donnees_tau, lam_sig, n_sig, n_bkg
 
 
+# ==========================================
+# FONCTION SECTION 3.7
+# ==========================================
 
-# exe 3.1  3.2
+# modele de masse ameliore : Gaussienne simple (signal) + Parabole negative (bruit)
+def fit_masse_parabole_bkg(df, branche="D0_MM", min_fit=1816, max_fit=1914):
+    # --- THEORIE ---
+    # On garde le signal modelise par une Gaussienne simple (comme en 3.3),
+    # mais on remplace la droite du bruit par une parabole tournee vers le bas
+    # (polynome de Chebyshev d'ordre 2 avec c2 < 0) pour suivre la courbure du fond.
 
+    masque_plage = (df[branche] >= min_fit) & (df[branche] <= max_fit)
+    donnees_masse = df[masque_plage][branche]
+    n_total = len(donnees_masse)
+
+    obs = zfit.Space(branche, min_fit, max_fit)
+
+    # Signal : meme gaussienne simple qu'en 3.3
+    mu = zfit.Parameter("mu_parab", 1865.0, 1850.0, 1880.0)
+    sigma = zfit.Parameter("sigma_parab", 8.0, 1.0, 25.0)
+
+    # Bruit de fond : polynome de Chebyshev d'ordre 2 = parabole (c2 <= 0 pour une parabole negative)
+    c1 = zfit.Parameter("c1_parab", -0.1, -0.5, 0.5)
+    c2 = zfit.Parameter("c2_parab", -0.05, -0.5, 0.0)
+
+    n_sig = zfit.Parameter("n_sig_parab", 0.7 * n_total, 0, n_total * 1.5)
+    n_bkg = zfit.Parameter("n_bkg_parab", 0.3 * n_total, 0, n_total * 1.5)
+
+    sig_model = zfit.pdf.Gauss(obs=obs, mu=mu, sigma=sigma, extended=n_sig)
+    bkg_model = zfit.pdf.Chebyshev(obs=obs, coeffs=[c1, c2], extended=n_bkg)
+
+    model = zfit.pdf.SumPDF([sig_model, bkg_model])
+    result = fit_donnees(donnees_masse, obs, model)
+
+    return result, model, bkg_model, donnees_masse, mu, sigma, c1, c2, n_sig, n_bkg
+
+
+# ==========================================
+# EXECUTION SECTIONS 3.1 & 3.2
+# ==========================================
 
 df_total = charge_donnees("data/MasterclassData_2012_all.root")
 
-# list(df_total.columns) -> recupere tout les entetes des branches D0_MM ect.
 liste_branches = list(df_total.columns)
-# visualisation des donnees
 print("Branches disponibles :", liste_branches)
 
-# creation des differents histogrammes individuellement
-dessine_branche(df_total, liste_branches)
+dessine_branche(df_total, liste_branches, echelle_log=True)
 
-# selection simple sur lidentification des particules 
 cond_kaon = df_total["Kplus_ProbNNk"] > 0.95
 cond_pion = df_total["piminus_ProbNNpi"] > 0.8
 masque_sel = cond_kaon & cond_pion
-
-# application du masque sur les tableau 
 df_selectionne = df_total[masque_sel]
 
-# nouvelle figure
-fig_sel = go.Figure()
+plt.figure(figsize=(8, 5))
+plt.hist(df_total["D0_MM"], bins=120, range=(1815, 1915), density=True, histtype="stepfilled", color=COULEUR_BRUIT, alpha=0.2)
+plt.hist(df_total["D0_MM"], bins=120, range=(1815, 1915), density=True, histtype="step", color=COULEUR_BRUIT, linewidth=1.6, label="Avant sélection")
+plt.hist(df_selectionne["D0_MM"], bins=120, range=(1815, 1915), density=True, histtype="stepfilled", color=COULEUR_SIGNAL, alpha=0.2)
+plt.hist(df_selectionne["D0_MM"], bins=120, range=(1815, 1915), density=True, histtype="step", color=COULEUR_SIGNAL, linewidth=1.6, label="Après coupures ProbNN")
+plt.title("Effet des coupures ProbNN sur le pic de masse du D⁰")
+plt.xlabel("Masse D0 [MeV/c²]")
+plt.ylabel("Densité de probabilité")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig(f"{dossier_sortie}/comparaison_selection.png")
+plt.close()
 
-fig_sel.add_trace(go.Histogram(
-    x=df_total["D0_MM"], # le masque deja applique a partire des probabilite
-    name="Avant sélection",
-    nbinsx=120,
-    histnorm="probability density",
-    opacity=0.6
-))
-fig_sel.add_trace(go.Histogram(
-    x=df_selectionne["D0_MM"],
-    name="Après coupures ProbNN",
-    nbinsx=120,
-    histnorm="probability density",
-    opacity=0.6
-))
-fig_sel.update_layout(
-    title="Effet des coupures ProbNN sur le pic de masse du D⁰",
-    title_x=0.5,
-    xaxis_title="Masse D0",
-    xaxis_range=[1800, 1930],
-    yaxis_title="Densité de probabilité",
-    barmode="overlay",
-    template="plotly_dark",
-    bargap=0.02
-)
-fig_sel.write_html(f"{dossier_sortie}/comparaison_selection.html")
-
-# on prend que les evenements qui contienne la mesure de la masse de D
 cond_pic = (df_total["D0_MM"] >= 1850) & (df_total["D0_MM"] <= 1882)
 df_signal_region = df_total[cond_pic]
 
-# on prend les mesures qui se situent en dehors de la mesure de la masse de D
 cond_bande_gauche = (df_total["D0_MM"] >= 1814) & (df_total["D0_MM"] <= 1849)
 cond_bande_droite = (df_total["D0_MM"] >= 1883) & (df_total["D0_MM"] <= 1914)
 df_bruit_region = df_total[cond_bande_gauche | cond_bande_droite]
 
-# Superposition Signal vs Bruit avec deux listes simples
 tableaux_a_comparer = [df_signal_region, df_bruit_region]
 noms_courbes = ["Région Pic (Signal dominant)", "Bandes Latérales (Bruit)"]
 variables_a_tracer = ["D0_DIRA_OWNPV", "D0_MINIPCHI2", "Kplus_ProbNNk", "piminus_ProbNNpi"]
 
-# on lui donne les tableaux et les noms
-dessine_branche_multiple(tableaux_a_comparer, noms_courbes, variables_a_tracer)
-
-print(f"Tracés Plotly terminés et enregistrés dans : {dossier_sortie}")
+dessine_branche_multiple(tableaux_a_comparer, noms_courbes, variables_a_tracer, echelle_log=True)
 
 
+# ==========================================
+# EXECUTION SECTION 3.3
+# ==========================================
 
-# exe 3.3
-
-
-# selection complete avec les coupures PID et geometriques
 cond_dira = df_total["D0_DIRA_OWNPV"] > 0.9998
 cond_ip = df_total["D0_MINIPCHI2"] < 9
 masque_complet = cond_kaon & cond_pion & cond_dira & cond_ip
 df_propre = df_total[masque_complet]
 
-# lancement du fit sur les donnees nettoye
-result, model, bkg_model, donnees_masse, mu, sigma, n_sig, n_bkg, S, B = fit_masse(df_propre)
+result, model, sig_model, bkg_model, donnees_masse, mu, sigma, n_sig, n_bkg, S, B = fit_masse(df_propre)
 print(result)
 
-# je recupere les valeurs et les erreurs trouvees par le fit
 params = result.params
 mu_val = params[mu]["value"]
 mu_err = params[mu]["hesse"]["error"]
@@ -366,134 +495,40 @@ n_bkg_val = params[n_bkg]["value"]
 print("Masse du D0 mesurée :", round(mu_val, 2), "+/-", round(mu_err, 2), "MeV/c²")
 print("Nombre de signal :", int(n_sig_val), "| Nombre de bruit :", int(n_bkg_val))
 
-# decoupage en 100 barres entre 1816 et 1914
-nbins = 100
-min_fit = 1816
-max_fit = 1914
-largeur_bin = (max_fit - min_fit) / nbins
-
-# np.histogram -> calcule le nombre devenements dans chaque barre
-comptes, bords = np.histogram(donnees_masse, bins=nbins, range=(min_fit, max_fit))
-
-# boucle pour trouver le milieu de chaque barre et son erreur (racine de N)
-centres = []
-erreurs_data = []
-for i in range(nbins):
-    milieu = (bords[i] + bords[i + 1]) / 2
-    centres.append(milieu)
-    # si la barre est vide on met 1.0 pour eviter de diviser par zero apres
-    if comptes[i] > 0:
-        erreurs_data.append(np.sqrt(comptes[i]))
-    else:
-        erreurs_data.append(1.0)
-
-centres = np.array(centres)
-erreurs_data = np.array(erreurs_data)
-
-# 500 points pour tracer une courbe bien lisse
-x_lisse = np.linspace(min_fit, max_fit, 500)
-y_total_lisse = model.pdf(x_lisse).numpy() * (n_sig_val + n_bkg_val) * largeur_bin
-y_bkg_lisse = bkg_model.pdf(x_lisse).numpy() * n_bkg_val * largeur_bin
-
-# nouvelle figure pour le fit de masse
-fig_fit = go.Figure()
-fig_fit.add_trace(go.Scatter(
-    x=centres,
-    y=comptes,
-    mode="markers",
-    name="Données sélectionnées",
-    error_y=dict(type="data", array=erreurs_data, visible=True), # barres derreur sur les points
-    marker=dict(color="cyan", size=5)
-))
-fig_fit.add_trace(go.Scatter(
-    x=x_lisse,
-    y=y_total_lisse,
-    mode="lines",
-    name=f"Fit zfit (M = {mu_val:.2f} ± {mu_err:.2f} MeV/c²)",
-    line=dict(color="orange", width=2.5)
-))
-fig_fit.add_trace(go.Scatter(
-    x=x_lisse,
-    y=y_bkg_lisse,
-    mode="lines",
-    name="Bruit de fond (Chebyshev)",
-    line=dict(color="red", width=2, dash="dash")
-))
-fig_fit.update_layout(
-    title="Fit étendu (zfit) de la masse du D⁰",
-    title_x=0.5,
-    xaxis_title="Masse D⁰ [MeV/c²]",
-    yaxis_title=f"Évènements / {largeur_bin:.2f} MeV/c²",
-    template="plotly_dark"
+comptes, centres, erreurs_data, largeur_bin, chi2_reduit = trace_fit(
+    donnees_masse, model, bkg_model, mu_val, mu_err, n_sig_val, n_bkg_val
 )
-fig_fit.write_html(f"{dossier_sortie}/fit_masse_D0.html")
-
-# calcul des pulls dans chaque barre (question 3.3.4)
-prediction_bins = model.pdf(centres).numpy() * (n_sig_val + n_bkg_val) * largeur_bin
-pulls = []
-somme_pulls_carre = 0.0
-
-for i in range(nbins):
-    pull_i = (prediction_bins[i] - comptes[i]) / erreurs_data[i]
-    pulls.append(pull_i)
-    somme_pulls_carre = somme_pulls_carre + pull_i ** 2
-
-# trace des pulls
-fig_pulls = go.Figure()
-fig_pulls.add_trace(go.Bar(x=centres, y=pulls, name="Pulls", marker_color="mediumseagreen"))
-fig_pulls.add_hline(y=0, line_color="white", line_width=1) # ligne a 0
-fig_pulls.add_hline(y=2, line_color="gray", line_dash="dash") # limite +2 sigma
-fig_pulls.add_hline(y=-2, line_color="gray", line_dash="dash") # limite -2 sigma
-fig_pulls.update_layout(
-    title="Pulls du fit de masse du D⁰",
-    title_x=0.5,
-    xaxis_title="Masse D⁰ [MeV/c²]",
-    yaxis_title="(Modèle - Données) / σ",
-    template="plotly_dark"
-)
-fig_pulls.write_html(f"{dossier_sortie}/pulls_masse_D0.html")
-
-# calcul du chi2 reduit (question 3.3.5)
-n_params_flottants = 5 # mu, sigma, c1, n_sig, n_bkg
-ndf = nbins - n_params_flottants # nombre de degres de liberte
-chi2_reduit = somme_pulls_carre / ndf
-print("Chi2 réduit :", round(chi2_reduit, 3), "(pour", ndf, "degrés de liberté)")
 
 
+# ==========================================
+# EXECUTION SECTION 3.4
+# ==========================================
 
-# exe 3.4
-
-
-# 1. on cherche le meilleur seuil pour D0_DIRA_OWNPV avec les coupures PID deja mises (question 3.4.3 & 3.4.4)
 seuils_dira = [0.9990, 0.9993, 0.9995, 0.9997, 0.9998, 0.9999, 0.99995]
 opt_dira, fom_dira = FOM_variable(df_selectionne, "D0_DIRA_OWNPV", seuils_dira, type_coupure="superieur")
 print("Meilleur seuil D0_DIRA_OWNPV (avec PID) :", opt_dira, "| FOM max :", round(fom_dira, 2))
 
-# 2. pareil pour D0_MINIPCHI2 apres avoir applique le meilleur DIRA
 df_apres_dira = df_selectionne[df_selectionne["D0_DIRA_OWNPV"] > opt_dira]
 seuils_ip = [25, 20, 16, 12, 9, 6, 4]
 opt_ip, fom_ip = FOM_variable(df_apres_dira, "D0_MINIPCHI2", seuils_ip, type_coupure="inferieur")
 print("Meilleur seuil D0_MINIPCHI2 (avec PID) :", opt_ip, "| FOM max :", round(fom_ip, 2))
 
-# 3. test sur df_total sans aucune coupure PID au depart (question 3.4.5)
 opt_dira_sans_pid, fom_sans_pid = FOM_variable(
     df_total, "D0_DIRA_OWNPV", seuils_dira, type_coupure="superieur", suffixe_fichier="_sans_PID"
 )
 print("Meilleur seuil D0_DIRA_OWNPV (SANS PID) :", opt_dira_sans_pid, "| FOM max :", round(fom_sans_pid, 2))
 
 
+# ==========================================
+# EXECUTION SECTION 3.5
+# ==========================================
 
-# exe 3.5
-
-
-# application des meilleures coupures trouvees au 3.4
 masque_optimal = cond_kaon & cond_pion & (df_total["D0_DIRA_OWNPV"] > opt_dira) & (df_total["D0_MINIPCHI2"] < opt_ip)
 df_optimal = df_total[masque_optimal]
 
-# separation entre la zone du pic et les bandes laterales (ou il y a que du bruit)
 df_tau_pic = df_optimal[(df_optimal["D0_MM"] >= 1850) & (df_optimal["D0_MM"] <= 1882)]
-df_tau_bruit = df_optimal[((df_optimal["D0_MM"] >= 1800) & (df_optimal["D0_MM"] <= 1835)) |
-                          ((df_optimal["D0_MM"] >= 1895) & (df_optimal["D0_MM"] <= 1930))]
+df_tau_bruit = df_optimal[((df_optimal["D0_MM"] >= 1815) & (df_optimal["D0_MM"] <= 1835)) |
+                          ((df_optimal["D0_MM"] >= 1895) & (df_optimal["D0_MM"] <= 1915))]
 
 min_tau = 0.0004
 max_tau = 0.004
@@ -509,18 +544,15 @@ lam_s_val = res_simple.params[lam_simple]["value"]
 lam_s_err = res_simple.params[lam_simple]["hesse"]["error"]
 n_s_val = res_simple.params[n_evts_simple]["value"]
 
-# conversion tau = -1 / lam en ns puis * 1000 pour lavoir en ps
 tau_simple_ps = (-1.0 / lam_s_val) * 1000.0
 err_tau_simple_ps = (lam_s_err / (lam_s_val ** 2)) * 1000.0
 print("\n[3.5.1] Duree de vie (1 exp) :", round(tau_simple_ps, 4), "+/-", round(err_tau_simple_ps, 4), "ps")
 
-# calcul du chi2 reduit et trace plotly
 comptes_tau, bords_tau = np.histogram(donnees_tau_pic, bins=nbins_tau, range=(min_tau, max_tau))
 centres_tau = []
 erreurs_tau = []
 for i in range(nbins_tau):
     centres_tau.append((bords_tau[i] + bords_tau[i + 1]) / 2)
-    # meme securite que pour la masse si un bin est vide
     if comptes_tau[i] > 0:
         erreurs_tau.append(np.sqrt(comptes_tau[i]))
     else:
@@ -537,28 +569,24 @@ print("[3.5.1] Chi2 reduit (1 exp) :", round(somme_pulls_simple / (nbins_tau - 2
 
 x_tau_lisse = np.linspace(min_tau, max_tau, 500)
 y_tau_simple_lisse = mod_simple.pdf(x_tau_lisse).numpy() * n_s_val * largeur_bin_tau
+masque_non_nul = comptes_tau > 0
 
-fig_tau1 = go.Figure()
-fig_tau1.add_trace(go.Scatter(
-    x=centres_tau, y=comptes_tau, mode="markers", name="Données région pic",
-    error_y=dict(type="data", array=erreurs_tau, visible=True),
-    marker=dict(color="cyan", size=5)
-))
-fig_tau1.add_trace(go.Scatter(
-    x=x_tau_lisse, y=y_tau_simple_lisse, mode="lines",
-    name=f"Fit 1 exp (τ = {tau_simple_ps:.4f} ± {err_tau_simple_ps:.4f} ps)",
-    line=dict(color="orange", width=2.5)
-))
-fig_tau1.update_layout(
-    title="Fit de la durée de vie du D⁰ (une seule exponentielle)",
-    title_x=0.5,
-    xaxis_title="Temps de vol D0_TAU [ns]",
-    yaxis_title="Évènements",
-    template="plotly_dark"
-)
-fig_tau1.write_html(f"{dossier_sortie}/fit_tau_simple.html")
+plt.figure(figsize=(8, 5))
+plt.fill_between(x_tau_lisse, 0.5, y_tau_simple_lisse, color=COULEUR_FIT, alpha=0.14)
+plt.errorbar(centres_tau[masque_non_nul], comptes_tau[masque_non_nul], yerr=erreurs_tau[masque_non_nul], fmt="o", color=COULEUR_POINTS, markersize=3.8, label="Données région pic")
+plt.plot(x_tau_lisse, y_tau_simple_lisse, color=COULEUR_FIT, linewidth=2.4, label=f"Fit 1 exp (τ = {tau_simple_ps:.4f} ± {err_tau_simple_ps:.4f} ps)")
+plt.yscale("log")
+plt.ylim(bottom=0.5)
+plt.title("Fit de la durée de vie du D⁰ (une seule exponentielle)")
+plt.xlabel("Temps de vol D0_TAU [ns]")
+plt.ylabel("Évènements (échelle log)")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig(f"{dossier_sortie}/fit_tau_simple.png")
+plt.close()
 
-# --- 3.5.2 : on mesure la pente du bruit sur les bandes laterales ---
+# --- 3.5.2 : pente du bruit sur les bandes laterales ---
 res_bkg, mod_bkg_tau, donnees_tau_bkg, lam_bkg, n_evts_bkg = fit_duree_vie_simple(
     df_tau_bruit, min_tau=min_tau, max_tau=max_tau, nom_param="_bkg"
 )
@@ -589,33 +617,230 @@ print("[3.5.3] Chi2 reduit (Signal + Bruit) :", round(somme_pulls_comp / (nbins_
 y_tau_comp_lisse = mod_comp.pdf(x_tau_lisse).numpy() * (n_sig_t_val + n_bkg_t_val) * largeur_bin_tau
 y_tau_bkg_lisse = bkg_comp.pdf(x_tau_lisse).numpy() * n_bkg_t_val * largeur_bin_tau
 
-fig_tau2 = go.Figure()
-fig_tau2.add_trace(go.Scatter(
-    x=centres_tau, y=comptes_tau, mode="markers", name="Données région pic",
-    error_y=dict(type="data", array=erreurs_tau, visible=True),
-    marker=dict(color="cyan", size=5)
-))
-fig_tau2.add_trace(go.Scatter(
-    x=x_tau_lisse, y=y_tau_comp_lisse, mode="lines",
-    name=f"Fit total (τ = {tau_final_ps:.4f} ± {err_tau_final_ps:.4f} ps)",
-    line=dict(color="orange", width=2.5)
-))
-fig_tau2.add_trace(go.Scatter(
-    x=x_tau_lisse, y=y_tau_bkg_lisse, mode="lines",
-    name="Contribution bruit de fond",
-    line=dict(color="red", width=2, dash="dash")
-))
-fig_tau2.update_layout(
-    title="Fit de la durée de vie du D⁰ (Signal + Bruit de fond)",
-    title_x=0.5,
-    xaxis_title="Temps de vol D0_TAU [ns]",
-    yaxis_title="Évènements",
-    template="plotly_dark"
+plt.figure(figsize=(8, 5))
+plt.fill_between(x_tau_lisse, 0.5, y_tau_bkg_lisse, color=COULEUR_BRUIT, alpha=0.14)
+plt.fill_between(x_tau_lisse, y_tau_bkg_lisse, y_tau_comp_lisse, color=COULEUR_FIT, alpha=0.14)
+plt.errorbar(centres_tau[masque_non_nul], comptes_tau[masque_non_nul], yerr=erreurs_tau[masque_non_nul], fmt="o", color=COULEUR_POINTS, markersize=3.8, label="Données région pic")
+plt.plot(x_tau_lisse, y_tau_comp_lisse, color=COULEUR_FIT, linewidth=2.4, label=f"Fit total (τ = {tau_final_ps:.4f} ± {err_tau_final_ps:.4f} ps)")
+plt.plot(x_tau_lisse, y_tau_bkg_lisse, color=COULEUR_BRUIT, linestyle="--", linewidth=1.8, label="Contribution bruit de fond")
+plt.yscale("log")
+plt.ylim(bottom=0.5)
+plt.title("Fit de la durée de vie du D⁰ (Signal + Bruit de fond)")
+plt.xlabel("Temps de vol D0_TAU [ns]")
+plt.ylabel("Évènements (échelle log)")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig(f"{dossier_sortie}/fit_tau_complet.png")
+plt.close()
+
+
+# ==========================================
+# EXECUTION SECTION 3.6 (METHODE SPLOT)
+# ==========================================
+
+res_m_splot, mod_m_splot, sig_m_splot, bkg_m_splot, donnees_m_splot, mu_sp, sig_sp, n_sig_sp, n_bkg_sp, S_sp, B_sp = fit_masse(
+    df_optimal, min_fit=1816, max_fit=1914, nom_param="_splot"
 )
-fig_tau2.write_html(f"{dossier_sortie}/fit_tau_complet.html")
+
+poids_splot = compute_sweights(mod_m_splot, donnees_m_splot.to_numpy())
+w_sig = poids_splot[n_sig_sp]
+w_bkg = poids_splot[n_bkg_sp]
+
+print("\n[3.6.1] Somme des poids signal :", round(np.sum(w_sig), 1), "| n_sig fit :", round(res_m_splot.params[n_sig_sp]["value"], 1))
+print("[3.6.1] Somme des poids bruit  :", round(np.sum(w_bkg), 1), "| n_bkg fit :", round(res_m_splot.params[n_bkg_sp]["value"], 1))
+
+df_splot = df_optimal[(df_optimal["D0_MM"] >= 1816) & (df_optimal["D0_MM"] <= 1914)].copy()
+df_splot["w_sig"] = w_sig
+df_splot["w_bkg"] = w_bkg
+
+masque_tau_sp = (df_splot["D0_TAU"] >= min_tau) & (df_splot["D0_TAU"] <= max_tau)
+tau_vals_sp = df_splot[masque_tau_sp]["D0_TAU"].to_numpy()
+w_sig_tau = df_splot[masque_tau_sp]["w_sig"].to_numpy()
+w_bkg_tau = df_splot[masque_tau_sp]["w_bkg"].to_numpy()
+
+comptes_sig_sp, bords_sp = np.histogram(tau_vals_sp, bins=nbins_tau, range=(min_tau, max_tau), weights=w_sig_tau)
+somme_w2_sig, _ = np.histogram(tau_vals_sp, bins=nbins_tau, range=(min_tau, max_tau), weights=w_sig_tau ** 2)
+erreurs_sig_sp = np.sqrt(somme_w2_sig)
+
+comptes_bkg_sp, _ = np.histogram(tau_vals_sp, bins=nbins_tau, range=(min_tau, max_tau), weights=w_bkg_tau)
+somme_w2_bkg, _ = np.histogram(tau_vals_sp, bins=nbins_tau, range=(min_tau, max_tau), weights=w_bkg_tau ** 2)
+erreurs_bkg_sp = np.sqrt(somme_w2_bkg)
+
+centres_sp = []
+for i in range(nbins_tau):
+    centres_sp.append((bords_sp[i] + bords_sp[i + 1]) / 2)
+centres_sp = np.array(centres_sp)
+
+plt.figure(figsize=(8, 5))
+masque_sig_pos = comptes_sig_sp > 0
+masque_bkg_pos = comptes_bkg_sp > 0
+plt.errorbar(centres_sp[masque_sig_pos], comptes_sig_sp[masque_sig_pos], yerr=erreurs_sig_sp[masque_sig_pos], fmt="o", color=COULEUR_SIGNAL, markersize=3.8, label="Signal seul (sPlot)")
+plt.errorbar(centres_sp[masque_bkg_pos], comptes_bkg_sp[masque_bkg_pos], yerr=erreurs_bkg_sp[masque_bkg_pos], fmt="s", color=COULEUR_BRUIT, markersize=3.8, label="Bruit de fond seul (sPlot)")
+plt.yscale("log")
+plt.ylim(bottom=0.5)
+plt.title("Distribution de D0_TAU séparée par la méthode sPlot")
+plt.xlabel("Temps de vol D0_TAU [ns]")
+plt.ylabel("Somme des poids (échelle log)")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig(f"{dossier_sortie}/splot_tau_signal_vs_bruit.png")
+plt.close()
+
+res_tau_sp, mod_tau_sp, donnees_tau_sp, lam_sp, n_evts_sp = fit_duree_vie_simple(
+    df_splot, min_tau=min_tau, max_tau=max_tau, nom_param="_splot_tau", colonne_poids="w_sig"
+)
+
+lam_sp_val = res_tau_sp.params[lam_sp]["value"]
+lam_sp_err = res_tau_sp.params[lam_sp]["hesse"]["error"]
+n_sp_val = res_tau_sp.params[n_evts_sp]["value"]
+
+tau_splot_ps = (-1.0 / lam_sp_val) * 1000.0
+err_tau_splot_ps = (lam_sp_err / (lam_sp_val ** 2)) * 1000.0
+print("[3.6.4] Duree de vie sPlot (Signal seul, 1 exp) :", round(tau_splot_ps, 4), "+/-", round(err_tau_splot_ps, 4), "ps")
+
+pred_sp = mod_tau_sp.pdf(centres_sp).numpy() * n_sp_val * largeur_bin_tau
+somme_pulls_sp = 0.0
+for i in range(nbins_tau):
+    if erreurs_sig_sp[i] > 0:
+        err_i = erreurs_sig_sp[i]
+    else:
+        err_i = 1.0
+    pull_i = (pred_sp[i] - comptes_sig_sp[i]) / err_i
+    somme_pulls_sp = somme_pulls_sp + pull_i ** 2
+print("[3.6.4] Chi2 reduit (sPlot 1 exp) :", round(somme_pulls_sp / (nbins_tau - 2), 3))
+
+y_tau_sp_lisse = mod_tau_sp.pdf(x_tau_lisse).numpy() * n_sp_val * largeur_bin_tau
+
+plt.figure(figsize=(8, 5))
+plt.fill_between(x_tau_lisse, 0.5, y_tau_sp_lisse, color=COULEUR_FIT, alpha=0.14)
+plt.errorbar(centres_sp[masque_sig_pos], comptes_sig_sp[masque_sig_pos], yerr=erreurs_sig_sp[masque_sig_pos], fmt="o", color=COULEUR_POINTS, markersize=3.8, label="Signal extrait (sWeights)")
+plt.plot(x_tau_lisse, y_tau_sp_lisse, color=COULEUR_FIT, linewidth=2.4, label=f"Fit sPlot 1 exp (τ = {tau_splot_ps:.4f} ± {err_tau_splot_ps:.4f} ps)")
+plt.yscale("log")
+plt.ylim(bottom=0.5)
+plt.title("Fit de la durée de vie du D⁰ via sPlot (Signal seul)")
+plt.xlabel("Temps de vol D0_TAU [ns]")
+plt.ylabel("Évènements pondérés (échelle log)")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig(f"{dossier_sortie}/fit_tau_splot.png")
+plt.close()
 
 
+# ==========================================
+# EXECUTION SECTION 3.7 (POUR ALLER PLUS LOIN)
+# ==========================================
 
+# --- 3.7.1 : Signal Gaussienne simple + Bruit de fond Parabole negative ---
+res_pb, mod_pb, bkg_pb, donnees_m_pb, mu_pb, sig_pb, c1_pb, c2_pb, ns_pb, nb_pb = fit_masse_parabole_bkg(df_propre)
+
+mu_pb_val = res_pb.params[mu_pb]["value"]
+mu_pb_err = res_pb.params[mu_pb]["hesse"]["error"]
+c2_pb_val = res_pb.params[c2_pb]["value"]
+n_tot_pb = res_pb.params[ns_pb]["value"] + res_pb.params[nb_pb]["value"]
+n_bkg_pb_val = res_pb.params[nb_pb]["value"]
+
+nbins = len(centres)
+pred_pb = mod_pb.pdf(centres).numpy() * n_tot_pb * largeur_bin
+somme_pulls_pb = 0.0
+for i in range(nbins):
+    pull_i = (pred_pb[i] - comptes[i]) / erreurs_data[i]
+    somme_pulls_pb = somme_pulls_pb + pull_i ** 2
+ndf_pb = nbins - 6 # 6 parametres libres : mu, sigma, c1, c2, n_sig, n_bkg
+chi2_reduit_pb = somme_pulls_pb / ndf_pb
+
+print("\n[3.7.1] Masse D0 (Gauss + Parabole) :", round(mu_pb_val, 2), "+/-", round(mu_pb_err, 2), "MeV/c²")
+print("[3.7.1] Courbure parabole c2 :", round(c2_pb_val, 4))
+print("[3.7.1] Chi2 reduit (Gauss + Parabole) :", round(chi2_reduit_pb, 3), "(contre", round(chi2_reduit, 3), "pour Gauss + droite)")
+
+x_lisse = np.linspace(1816, 1914, 500)
+y_pb_lisse = mod_pb.pdf(x_lisse).numpy() * n_tot_pb * largeur_bin
+y_bkg_pb_lisse = bkg_pb.pdf(x_lisse).numpy() * n_bkg_pb_val * largeur_bin
+
+plt.figure(figsize=(8.5, 5))
+plt.fill_between(x_lisse, 0, y_bkg_pb_lisse, color=COULEUR_BRUIT, alpha=0.15)
+plt.fill_between(x_lisse, y_bkg_pb_lisse, y_pb_lisse, color=COULEUR_FIT, alpha=0.15)
+plt.errorbar(centres, comptes, yerr=erreurs_data, fmt="o", color=COULEUR_POINTS, markersize=3.8, label="Données sélectionnées")
+plt.plot(x_lisse, y_pb_lisse, color=COULEUR_FIT, linewidth=2.4, label=f"Fit Gauss + Parabole (χ²/ndf = {chi2_reduit_pb:.2f})")
+plt.plot(x_lisse, y_bkg_pb_lisse, color=COULEUR_BRUIT, linestyle="--", linewidth=1.8, label="Bruit de fond (Parabole)")
+plt.ylim(bottom=0)
+plt.title("Modèle amélioré : Gaussienne + Parabole négative")
+plt.xlabel("Masse D⁰ [MeV/c²]")
+plt.ylabel(f"Évènements / {largeur_bin:.2f} MeV/c²")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig(f"{dossier_sortie}/fit_masse_parabole.png")
+plt.close()
+
+# --- 3.7.2 : Calcul manuel des sWeights sans hepstats (inversion directe 2x2) ---
+m_vals = donnees_m_splot.to_numpy()
+f_S = sig_m_splot.pdf(m_vals).numpy()
+f_B = bkg_m_splot.pdf(m_vals).numpy()
+
+N_S = res_m_splot.params[n_sig_sp]["value"]
+N_B = res_m_splot.params[n_bkg_sp]["value"]
+denom = N_S * f_S + N_B * f_B
+
+M_SS = np.sum((f_S * f_S) / (denom ** 2))
+M_SB = np.sum((f_S * f_B) / (denom ** 2))
+M_BB = np.sum((f_B * f_B) / (denom ** 2))
+
+determinant = M_SS * M_BB - M_SB ** 2
+V_SS = M_BB / determinant
+V_SB = -M_SB / determinant
+
+w_sig_manuel = (V_SS * f_S + V_SB * f_B) / denom
+ecart_max = np.max(np.abs(w_sig_manuel - w_sig))
+print(f"[3.7.2] Ecart max entre sWeights manuels et hepstats : {ecart_max:.2e}")
+
+# --- 3.7.3 : Soustraction des bandes laterales (Sideband Subtraction) ---
+mu_sp_val = res_m_splot.params[mu_sp]["value"]
+sig_sp_val = res_m_splot.params[sig_sp]["value"]
+
+min_pic = mu_sp_val - 3 * sig_sp_val
+max_pic = mu_sp_val + 3 * sig_sp_val
+max_bg_gauche = mu_sp_val - 4 * sig_sp_val
+min_bg_droite = mu_sp_val + 4 * sig_sp_val
+
+int_bruit_pic = bkg_m_splot.integrate(limits=zfit.Space("D0_MM", min_pic, max_pic)).numpy()[0]
+int_bruit_side = (
+    bkg_m_splot.integrate(limits=zfit.Space("D0_MM", 1816, max_bg_gauche)).numpy()[0]
+    + bkg_m_splot.integrate(limits=zfit.Space("D0_MM", min_bg_droite, 1914)).numpy()[0]
+)
+alpha_sb = int_bruit_pic / int_bruit_side
+
+df_sb_pic = df_optimal[(df_optimal["D0_MM"] >= min_pic) & (df_optimal["D0_MM"] <= max_pic)]
+df_sb_side = df_optimal[((df_optimal["D0_MM"] >= 1816) & (df_optimal["D0_MM"] <= max_bg_gauche)) |
+                        ((df_optimal["D0_MM"] >= min_bg_droite) & (df_optimal["D0_MM"] <= 1914))]
+
+h_pic, _ = np.histogram(df_sb_pic["D0_TAU"], bins=nbins_tau, range=(min_tau, max_tau))
+h_side, _ = np.histogram(df_sb_side["D0_TAU"], bins=nbins_tau, range=(min_tau, max_tau))
+
+h_sig_sb = h_pic - alpha_sb * h_side
+err_sig_sb = np.sqrt(h_pic + (alpha_sb ** 2) * h_side)
+
+plt.figure(figsize=(8, 5))
+masque_sb_pos = h_sig_sb > 0
+plt.errorbar(centres_sp[masque_sig_pos], comptes_sig_sp[masque_sig_pos], yerr=erreurs_sig_sp[masque_sig_pos], fmt="o", color=COULEUR_SIGNAL, markersize=3.8, label="Méthode sPlot")
+plt.errorbar(centres_sp[masque_sb_pos], h_sig_sb[masque_sb_pos], yerr=err_sig_sb[masque_sb_pos], fmt="^", color=COULEUR_PULLS, markersize=4.2, label="Soustraction bandes latérales")
+plt.yscale("log")
+plt.ylim(bottom=0.5)
+plt.title("Extraction du signal D0_TAU : sPlot vs Bandes latérales")
+plt.xlabel("Temps de vol D0_TAU [ns]")
+plt.ylabel("Évènements de signal (échelle log)")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig(f"{dossier_sortie}/comparaison_splot_vs_sideband.png")
+plt.close()
+
+
+# ==========================================
+# REPONSES TEXTE
+# ==========================================
 
 # 3.1 Preambule
 
