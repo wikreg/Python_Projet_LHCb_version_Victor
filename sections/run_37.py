@@ -5,14 +5,19 @@ from fonctions.sec31_32_donnees import COULEUR_SIGNAL, COULEUR_POINTS, COULEUR_F
 from fonctions.sec37_avance import fit_masse_parabole_bkg, calcul_sweights_manuel
 from sections import run_33, run_34, run_36
 
+# Script exécutable pour la section 3.7 : modèle parabolique, vérification des sWeights et comparaison bandes latérales
+# df_propre, df_optimal, comptes, centres, erreurs_data, largeur_bin, chi2_reduit -> résultats optionnels passés par main.py
+# dossier -> dossier où sauvegarder les graphiques
 def executer(df_propre=None, df_optimal=None, comptes=None, centres=None, erreurs_data=None, largeur_bin=None, chi2_reduit=None, dossier="histograms_plots"):
+    # Initialise le style sombre et crée le dossier de sortie si besoin
     configurer_style(dossier)
+    # Si le script est lancé seul, récupère les données/résultats nécessaires depuis les sections précédentes
     if df_propre is None:
         df_propre, comptes, centres, erreurs_data, largeur_bin, chi2_reduit = run_33.executer(dossier=dossier)
     if df_optimal is None:
         df_optimal, _, _ = run_34.executer(dossier=dossier)
 
-    # 3.7.1 : Signal Gaussienne + Bruit Parabole négative
+    # 3.7.1 : ajuste la masse avec une gaussienne et une parabole négative pour le bruit de fond
     res_pb, mod_pb, bkg_pb, donnees_m_pb, mu_pb, sig_pb, c1_pb, c2_pb, ns_pb, nb_pb = fit_masse_parabole_bkg(df_propre)
 
     mu_pb_val = res_pb.params[mu_pb]["value"]
@@ -21,6 +26,7 @@ def executer(df_propre=None, df_optimal=None, comptes=None, centres=None, erreur
     n_tot_pb = res_pb.params[ns_pb]["value"] + res_pb.params[nb_pb]["value"]
     n_bkg_pb_val = res_pb.params[nb_pb]["value"]
 
+    # Calcule les pulls et le chi2 réduit du modèle parabolique (6 paramètres flottants : mu, sigma, c1, c2, n_sig, n_bkg)
     nbins = len(centres)
     pred_pb = mod_pb.pdf(centres).numpy() * n_tot_pb * largeur_bin
     somme_pulls_pb = 0.0
@@ -33,6 +39,7 @@ def executer(df_propre=None, df_optimal=None, comptes=None, centres=None, erreur
     print(f"[3.7.1] Courbure parabole c2 : {c2_pb_val:.4f}")
     print(f"[3.7.1] Chi2 réduit (Gauss + Parabole) : {chi2_reduit_pb:.3f} (contre {chi2_reduit:.3f})")
 
+    # Trace l'ajustement obtenu avec le bruit parabolique
     x_lisse = np.linspace(1816, 1914, 500)
     y_pb_lisse = mod_pb.pdf(x_lisse).numpy() * n_tot_pb * largeur_bin
     y_bkg_pb_lisse = bkg_pb.pdf(x_lisse).numpy() * n_bkg_pb_val * largeur_bin
@@ -53,7 +60,7 @@ def executer(df_propre=None, df_optimal=None, comptes=None, centres=None, erreur
     plt.savefig(f"{dossier}/fit_masse_parabole.png")
     plt.close()
 
-    # 3.7.2 : sWeights manuels vs hepstats
+    # 3.7.2 : compare les sWeights calculés à la main avec ceux de hepstats
     res_m_splot, sig_m_splot, bkg_m_splot, donnees_m_splot, mu_sp, sig_sp, n_sig_sp, n_bkg_sp, w_sig, centres_sp, comptes_sig_sp, erreurs_sig_sp = run_36.executer(df_optimal=df_optimal, dossier=dossier)
 
     w_sig_manuel = calcul_sweights_manuel(
@@ -62,12 +69,14 @@ def executer(df_propre=None, df_optimal=None, comptes=None, centres=None, erreur
     )
     print(f"[3.7.2] Écart max entre sWeights manuels et hepstats : {np.max(np.abs(w_sig_manuel - w_sig)):.2e}")
 
-    # 3.7.3 : Soustraction des bandes latérales
+    # 3.7.3 : extraction du signal en temps de vol par soustraction des bandes latérales
     mu_sp_val = res_m_splot.params[mu_sp]["value"]
     sig_sp_val = res_m_splot.params[sig_sp]["value"]
+    # Fenêtre du pic à +/- 3 sigma et bandes latérales au-delà de +/- 4 sigma
     min_pic, max_pic = mu_sp_val - 3 * sig_sp_val, mu_sp_val + 3 * sig_sp_val
     max_bg_gauche, min_bg_droite = mu_sp_val - 4 * sig_sp_val, mu_sp_val + 4 * sig_sp_val
 
+    # Facteur d'échelle alpha : rapport du bruit intégré sous le pic sur le bruit intégré dans les bandes latérales
     int_bruit_pic = bkg_m_splot.integrate(limits=zfit.Space("D0_MM", min_pic, max_pic)).numpy()[0]
     int_bruit_side = (
         bkg_m_splot.integrate(limits=zfit.Space("D0_MM", 1816, max_bg_gauche)).numpy()[0] +
@@ -75,6 +84,7 @@ def executer(df_propre=None, df_optimal=None, comptes=None, centres=None, erreur
     )
     alpha_sb = int_bruit_pic / int_bruit_side
 
+    # Sélectionne les évènements de la région du pic et des bandes latérales pour D0_TAU
     df_sb_pic = df_optimal[(df_optimal["D0_MM"] >= min_pic) & (df_optimal["D0_MM"] <= max_pic)]
     df_sb_side = df_optimal[((df_optimal["D0_MM"] >= 1816) & (df_optimal["D0_MM"] <= max_bg_gauche)) |
                             ((df_optimal["D0_MM"] >= min_bg_droite) & (df_optimal["D0_MM"] <= 1914))]
@@ -82,9 +92,11 @@ def executer(df_propre=None, df_optimal=None, comptes=None, centres=None, erreur
     h_pic, _ = np.histogram(df_sb_pic["D0_TAU"], bins=60, range=(0.0004, 0.004))
     h_side, _ = np.histogram(df_sb_side["D0_TAU"], bins=60, range=(0.0004, 0.004))
 
+    # Soustraction du bruit pondéré et propagation d'erreur quadratique
     h_sig_sb = h_pic - alpha_sb * h_side
     err_sig_sb = np.sqrt(h_pic + (alpha_sb ** 2) * h_side)
 
+    # Compare graphiquement sPlot et soustraction des bandes latérales en échelle logarithmique
     plt.figure(figsize=(8, 5))
     masque_sig_pos = comptes_sig_sp > 0
     masque_sb_pos = h_sig_sb > 0
@@ -101,5 +113,6 @@ def executer(df_propre=None, df_optimal=None, comptes=None, centres=None, erreur
     plt.savefig(f"{dossier}/comparaison_splot_vs_sideband.png")
     plt.close()
 
+# Permet d'exécuter cette section directement (ex. python -m sections.run_37)
 if __name__ == "__main__":
     executer()
